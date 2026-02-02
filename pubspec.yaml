@@ -1,0 +1,47 @@
+name: modbus_tester
+description: Production-grade Modbus RTU/TCP tester for factory automation and building management engineers.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  
+  # State Management
+  provider: 6.1.5+1
+  
+  # Local Storage
+  hive: 2.2.3
+  hive_flutter: 1.1.0
+  shared_preferences: 2.5.3
+  
+  # Networking
+  http: 1.5.0
+  
+  # File Operations
+  path_provider: ^2.1.1
+  share_plus: ^7.2.1
+  file_picker: ^6.1.1
+  
+  # Utilities
+  intl: ^0.19.0
+  uuid: ^4.2.1
+  equatable: ^2.0.5
+  collection: ^1.18.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.7
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/icons/
