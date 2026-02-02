@@ -90,13 +90,16 @@ class _DashboardScreenState extends State<DashboardScreen>
   ];
 
   // Register values with history
-  Map<String, RegisterValue> _registerValues = {};
-  Map<String, List<RegisterHistoryEntry>> _registerHistory = {};
+  final Map<String, RegisterValue> _registerValues = {};
+  final Map<String, List<RegisterHistoryEntry>> _registerHistory = {};
   
   CommunicationStats _stats = CommunicationStats(startTime: DateTime.now());
   Timer? _pollingTimer;
   bool _isPolling = false;
+  bool _isPollInProgress = false;  // Prevent polling overlap
   int _pollingInterval = 1000;
+  String? _lastError;  // Track last error for UI feedback
+  static const int _maxHistoryLength = 120;  // Maximum history entries per register
 
   @override
   void initState() {
@@ -125,7 +128,17 @@ class _DashboardScreenState extends State<DashboardScreen>
   void _startPolling() {
     if (_isPolling) return;
     
-    setState(() => _isPolling = true);
+    final provider = context.read<ModbusProvider>();
+    if (!provider.isConnected) {
+      _showError('Cannot start polling: Not connected');
+      return;
+    }
+    
+    setState(() {
+      _isPolling = true;
+      _lastError = null;
+    });
+    
     _pollingTimer = Timer.periodic(
       Duration(milliseconds: _pollingInterval),
       (_) => _pollRegisters(),
@@ -135,67 +148,112 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _stopPolling() {
     _pollingTimer?.cancel();
-    setState(() => _isPolling = false);
+    _pollingTimer = null;
+    setState(() {
+      _isPolling = false;
+      _isPollInProgress = false;
+    });
+  }
+  
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: AppColors.error,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   Future<void> _pollRegisters() async {
-    final provider = context.read<ModbusProvider>();
-    if (!provider.isConnected) return;
-
-    final stopwatch = Stopwatch()..start();
+    // Prevent overlapping polls
+    if (_isPollInProgress) return;
+    _isPollInProgress = true;
     
-    for (final reg in _watchlistRegisters) {
-      final response = await provider.sendRequest(ModbusRequest(
-        slaveId: 1,
-        functionCode: reg.functionCode,
-        startAddress: reg.address,
-        quantity: reg.dataFormat.registerCount,
-        dataFormat: reg.dataFormat,
-        byteOrder: reg.byteOrder,
-      ));
-      
-      stopwatch.stop();
-      
-      setState(() {
-        _stats = _stats.recordRequest(
-          response?.success ?? false,
-          response?.responseTimeMs ?? 0,
-          isTimeout: response?.errorMessage?.contains('timeout') ?? false,
-          isException: response?.exceptionCode != null,
-        );
+    final provider = context.read<ModbusProvider>();
+    
+    // Auto-stop polling if disconnected
+    if (!provider.isConnected) {
+      _stopPolling();
+      if (mounted) {
+        setState(() => _lastError = 'Connection lost, polling stopped');
+      }
+      _isPollInProgress = false;
+      return;
+    }
 
-        if (response != null) {
-          final oldValue = _registerValues[reg.id];
-          final newValue = response.success && response.interpretedData != null
-              ? response.interpretedData!.first
-              : null;
+    try {
+      for (final reg in _watchlistRegisters) {
+        // Check if we should stop during iteration
+        if (!_isPolling || !mounted) break;
+        
+        try {
+          final response = await provider.sendRequest(ModbusRequest(
+            slaveId: provider.currentSlaveId,
+            functionCode: reg.functionCode,
+            startAddress: reg.address,
+            quantity: reg.dataFormat.registerCount,
+            dataFormat: reg.dataFormat,
+            byteOrder: reg.byteOrder,
+          ));
+          
+          if (!mounted) return;
+          
+          setState(() {
+            _stats = _stats.recordRequest(
+              response?.success ?? false,
+              response?.responseTimeMs ?? 0,
+              isTimeout: response?.errorMessage?.contains('timeout') ?? false,
+              isException: response?.exceptionCode != null,
+            );
 
-          // Update history
-          if (newValue != null) {
-            final history = _registerHistory[reg.id] ?? [];
-            history.add(RegisterHistoryEntry(
-              timestamp: DateTime.now(),
-              value: newValue,
-              quality: response.success ? 100 : 0,
-            ));
-            if (history.length > 120) {
-              history.removeAt(0);
+            if (response != null) {
+              final oldValue = _registerValues[reg.id];
+              final newValue = response.success && response.interpretedData != null
+                  ? response.interpretedData!.first
+                  : null;
+
+              // Update history with proper memory management
+              if (newValue != null) {
+                final history = _registerHistory[reg.id] ?? [];
+                history.add(RegisterHistoryEntry(
+                  timestamp: DateTime.now(),
+                  value: newValue,
+                  quality: response.success ? 100 : 0,
+                ));
+                // Remove old entries to prevent memory growth
+                while (history.length > _maxHistoryLength) {
+                  history.removeAt(0);
+                }
+                _registerHistory[reg.id] = history;
+              }
+
+              _registerValues[reg.id] = RegisterValue(
+                definition: reg,
+                currentValue: newValue,
+                previousValue: oldValue?.currentValue,
+                timestamp: DateTime.now(),
+                history: _registerHistory[reg.id] ?? [],
+                hasError: !response.success,
+                errorMessage: response.errorMessage,
+                quality: response.success ? 100 : 0,
+              );
+              
+              _lastError = response.success ? null : response.errorMessage;
             }
-            _registerHistory[reg.id] = history;
+          });
+        } catch (e) {
+          if (mounted) {
+            setState(() {
+              _lastError = 'Error polling ${reg.name}: $e';
+              _stats = _stats.recordRequest(false, 0, isTimeout: true);
+            });
           }
-
-          _registerValues[reg.id] = RegisterValue(
-            definition: reg,
-            currentValue: newValue,
-            previousValue: oldValue?.currentValue,
-            timestamp: DateTime.now(),
-            history: _registerHistory[reg.id] ?? [],
-            hasError: !response.success,
-            errorMessage: response.errorMessage,
-            quality: response.success ? 100 : 0,
-          );
         }
-      });
+      }
+    } finally {
+      _isPollInProgress = false;
     }
   }
 
@@ -251,28 +309,46 @@ class _DashboardScreenState extends State<DashboardScreen>
             showLabel: false,
           ),
           const SizedBox(width: 12),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'MONITORING DASHBOARD',
-                style: TextStyle(
-                  color: AppColors.textSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'MONITORING DASHBOARD',
+                  style: TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1,
+                  ),
                 ),
-              ),
-              Text(
-                _isPolling ? 'Polling: ${_pollingInterval}ms' : 'Stopped',
-                style: TextStyle(
-                  color: _isPolling ? AppColors.success : AppColors.textMuted,
-                  fontSize: 12,
+                Row(
+                  children: [
+                    Text(
+                      _isPolling ? 'Polling: ${_pollingInterval}ms' : 'Stopped',
+                      style: TextStyle(
+                        color: _isPolling ? AppColors.success : AppColors.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                    if (_lastError != null) ...[
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          _lastError!,
+                          style: const TextStyle(
+                            color: AppColors.error,
+                            fontSize: 10,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          const Spacer(),
           // Polling interval selector
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8),

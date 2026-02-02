@@ -318,18 +318,36 @@ class IndustrialDropdown<T> extends StatelessWidget {
   }
 }
 
-/// IP Address input field
+/// IP Address input field with validation
 class IpAddressField extends StatefulWidget {
   final String label;
   final String value;
   final ValueChanged<String> onChanged;
+  final ValueChanged<bool>? onValidationChanged;  // Notify parent of validation state
 
   const IpAddressField({
     super.key,
     required this.label,
     required this.value,
     required this.onChanged,
+    this.onValidationChanged,
   });
+  
+  /// Validate an IP address string
+  static bool isValidIpAddress(String ip) {
+    if (ip.isEmpty) return false;
+    
+    final parts = ip.split('.');
+    if (parts.length != 4) return false;
+    
+    for (final part in parts) {
+      if (part.isEmpty) return false;
+      final value = int.tryParse(part);
+      if (value == null || value < 0 || value > 255) return false;
+    }
+    
+    return true;
+  }
 
   @override
   State<IpAddressField> createState() => _IpAddressFieldState();
@@ -337,6 +355,9 @@ class IpAddressField extends StatefulWidget {
 
 class _IpAddressFieldState extends State<IpAddressField> {
   late List<TextEditingController> _controllers;
+  late List<FocusNode> _focusNodes;
+  bool _isValid = true;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -345,6 +366,20 @@ class _IpAddressFieldState extends State<IpAddressField> {
     _controllers = List.generate(4, (i) {
       return TextEditingController(text: i < parts.length ? parts[i] : '0');
     });
+    _focusNodes = List.generate(4, (i) => FocusNode());
+    _validateIp();
+  }
+  
+  @override
+  void didUpdateWidget(IpAddressField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value) {
+      final parts = widget.value.split('.');
+      for (int i = 0; i < 4; i++) {
+        _controllers[i].text = i < parts.length ? parts[i] : '0';
+      }
+      _validateIp();
+    }
   }
 
   @override
@@ -352,12 +387,53 @@ class _IpAddressFieldState extends State<IpAddressField> {
     for (final controller in _controllers) {
       controller.dispose();
     }
+    for (final node in _focusNodes) {
+      node.dispose();
+    }
     super.dispose();
+  }
+  
+  void _validateIp() {
+    final ip = _controllers.map((c) => c.text.isEmpty ? '0' : c.text).join('.');
+    final newIsValid = IpAddressField.isValidIpAddress(ip);
+    
+    String? newErrorMessage;
+    if (!newIsValid) {
+      // Check for specific errors
+      final parts = ip.split('.');
+      if (parts.any((p) => p.isEmpty || int.tryParse(p) == null)) {
+        newErrorMessage = 'Invalid IP format';
+      } else if (ip == '0.0.0.0') {
+        newErrorMessage = 'IP cannot be 0.0.0.0';
+      } else if (parts.any((p) => int.parse(p) > 255)) {
+        newErrorMessage = 'Each octet must be 0-255';
+      }
+    }
+    
+    if (_isValid != newIsValid || _errorMessage != newErrorMessage) {
+      setState(() {
+        _isValid = newIsValid;
+        _errorMessage = newErrorMessage;
+      });
+      widget.onValidationChanged?.call(newIsValid);
+    }
   }
 
   void _updateValue() {
     final ip = _controllers.map((c) => c.text.isEmpty ? '0' : c.text).join('.');
+    _validateIp();
     widget.onChanged(ip);
+  }
+  
+  void _handleOctetChanged(int index, String value) {
+    _updateValue();
+    
+    // Auto-advance to next field when 3 digits entered or value > 25
+    if (value.length == 3 || (value.isNotEmpty && int.parse(value) > 25)) {
+      if (index < 3) {
+        _focusNodes[index + 1].requestFocus();
+      }
+    }
   }
 
   @override
@@ -366,58 +442,94 @@ class _IpAddressFieldState extends State<IpAddressField> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          widget.label,
-          style: const TextStyle(
-            color: AppColors.textSecondary,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
+        Row(
+          children: [
+            Text(
+              widget.label,
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (!_isValid) ...[
+              const SizedBox(width: 8),
+              Icon(
+                Icons.error_outline,
+                color: AppColors.error,
+                size: 14,
+              ),
+            ],
+          ],
         ),
         const SizedBox(height: 6),
-        Row(
-          children: List.generate(7, (index) {
-            if (index.isOdd) {
-              return const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '.',
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: _isValid ? AppColors.border : AppColors.error,
+              width: _isValid ? 1 : 2,
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            children: List.generate(7, (index) {
+              if (index.isOdd) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    '.',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
+              }
+              final controllerIndex = index ~/ 2;
+              return Expanded(
+                child: TextFormField(
+                  controller: _controllers[controllerIndex],
+                  focusNode: _focusNodes[controllerIndex],
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(3),
+                    _IpOctetFormatter(),
+                  ],
+                  onChanged: (value) => _handleOctetChanged(controllerIndex, value),
                   style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
+                    color: _isValid ? AppColors.textPrimary : AppColors.error,
+                    fontSize: 18,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                  ),
+                  decoration: const InputDecoration(
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 16,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
                   ),
                 ),
               );
-            }
-            final controllerIndex = index ~/ 2;
-            return Expanded(
-              child: TextFormField(
-                controller: _controllers[controllerIndex],
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(3),
-                  _IpOctetFormatter(),
-                ],
-                onChanged: (_) => _updateValue(),
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 18,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.w600,
-                ),
-                decoration: const InputDecoration(
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 16,
-                  ),
-                ),
-              ),
-            );
-          }),
+            }),
+          ),
         ),
+        if (_errorMessage != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            _errorMessage!,
+            style: const TextStyle(
+              color: AppColors.error,
+              fontSize: 11,
+            ),
+          ),
+        ],
       ],
     );
   }

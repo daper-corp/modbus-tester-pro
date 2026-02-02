@@ -22,7 +22,7 @@ class _LogScreenState extends State<LogScreen> {
   bool _autoScroll = true;
   bool _showSearch = false;
   String _searchQuery = '';
-  Set<String> _bookmarkedIds = {};
+  final Set<String> _bookmarkedIds = {};
   bool _showOnlyBookmarked = false;
   bool _showOnlyErrors = false;
   

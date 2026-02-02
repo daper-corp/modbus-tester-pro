@@ -224,7 +224,9 @@ class DeviceMonitor {
   
   bool isConnected = false;
   bool isPolling = false;
+  bool _isPollInProgress = false;  // Prevent polling overlap
   int pollingInterval = 1000;
+  String? lastError;  // Track last error for UI feedback
   
   CommunicationStats stats = CommunicationStats(startTime: DateTime.now());
   List<WatchedRegister> watchedRegisters = [];
@@ -257,6 +259,7 @@ class DeviceMonitor {
     if (isPolling) return;
     
     isPolling = true;
+    lastError = null;
     _pollingTimer = Timer.periodic(
       Duration(milliseconds: pollingInterval),
       (_) => _pollRegisters(sendRequest),
@@ -266,33 +269,60 @@ class DeviceMonitor {
   
   void stopPolling() {
     isPolling = false;
+    _isPollInProgress = false;
     _pollingTimer?.cancel();
+    _pollingTimer = null;
   }
   
   Future<void> _pollRegisters(Future<ModbusResponse?> Function(ModbusRequest) sendRequest) async {
-    for (final reg in watchedRegisters) {
-      final request = ModbusRequest(
-        slaveId: slaveId,
-        functionCode: reg.functionCode,
-        startAddress: reg.address,
-        quantity: 1,
-        dataFormat: reg.dataFormat,
-      );
-      
-      final response = await sendRequest(request);
-      
-      if (response != null) {
-        reg.lastValue = response.interpretedData?.isNotEmpty == true
-            ? response.interpretedData!.first
-            : null;
-        reg.lastUpdate = DateTime.now();
-        reg.hasError = !response.success;
+    // Prevent overlapping polls
+    if (_isPollInProgress) {
+      return;
+    }
+    _isPollInProgress = true;
+    
+    try {
+      for (final reg in watchedRegisters) {
+        // Check if polling was stopped during iteration
+        if (!isPolling) break;
         
-        stats = stats.recordRequest(
-          response.success,
-          response.responseTimeMs,
+        final request = ModbusRequest(
+          slaveId: slaveId,
+          functionCode: reg.functionCode,
+          startAddress: reg.address,
+          quantity: 1,
+          dataFormat: reg.dataFormat,
         );
+        
+        try {
+          final response = await sendRequest(request);
+          
+          if (response != null) {
+            reg.lastValue = response.interpretedData?.isNotEmpty == true
+                ? response.interpretedData!.first
+                : null;
+            reg.lastUpdate = DateTime.now();
+            reg.hasError = !response.success;
+            lastError = response.success ? null : response.errorMessage;
+            
+            stats = stats.recordRequest(
+              response.success,
+              response.responseTimeMs,
+            );
+          } else {
+            reg.hasError = true;
+            lastError = 'No response received';
+          }
+        } catch (e) {
+          reg.hasError = true;
+          lastError = 'Communication error: $e';
+          stats = stats.recordRequest(false, 0, isTimeout: true);
+        }
       }
+    } catch (e) {
+      lastError = 'Polling error: $e';
+    } finally {
+      _isPollInProgress = false;
     }
   }
   

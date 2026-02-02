@@ -6,6 +6,9 @@ import '../services/modbus_tcp_service.dart';
 import '../services/log_service.dart';
 import '../services/storage_service.dart';
 
+/// Callback type for connection state errors
+typedef ConnectionErrorCallback = void Function(String error);
+
 /// Main state provider for Modbus operations
 class ModbusProvider extends ChangeNotifier {
   final LogService _logService;
@@ -13,6 +16,10 @@ class ModbusProvider extends ChangeNotifier {
   
   ModbusService? _modbusService;
   Timer? _pollingTimer;
+  StreamSubscription<ModbusConnectionState>? _connectionStateSubscription;
+  
+  // Current slave ID for keep-alive
+  int _currentSlaveId = 1;
   
   // Connection state
   ConnectionType _connectionType = ConnectionType.tcp;
@@ -60,6 +67,7 @@ class ModbusProvider extends ChangeNotifier {
   List<DeviceProfile> get profiles => _profiles;
   DeviceProfile? get activeProfile => _activeProfile;
   LogService get logService => _logService;
+  int get currentSlaveId => _currentSlaveId;
   
   bool get isConnected => _connectionState == ModbusConnectionState.connected;
   bool get isConnecting => _connectionState == ModbusConnectionState.connecting;
@@ -139,11 +147,29 @@ class ModbusProvider extends ChangeNotifier {
       );
     }
     
+    // Cancel previous subscription to prevent memory leak
+    await _connectionStateSubscription?.cancel();
+    
     // Subscribe to connection state changes
-    _modbusService!.connectionStateStream.listen((state) {
-      _connectionState = state;
-      notifyListeners();
-    });
+    _connectionStateSubscription = _modbusService!.connectionStateStream.listen(
+      (state) {
+        _connectionState = state;
+        // Auto-stop polling if disconnected
+        if (state == ModbusConnectionState.disconnected || 
+            state == ModbusConnectionState.error) {
+          if (_isPollingEnabled) {
+            stopPolling();
+            _logService.logWarning('Polling stopped due to connection loss');
+          }
+        }
+        notifyListeners();
+      },
+      onError: (error) {
+        _logService.logError('Connection state stream error: $error');
+        _connectionState = ModbusConnectionState.error;
+        notifyListeners();
+      },
+    );
     
     final success = await _modbusService!.connect();
     
@@ -168,6 +194,11 @@ class ModbusProvider extends ChangeNotifier {
   /// Disconnect from device
   Future<void> disconnect() async {
     stopPolling();
+    
+    // Cancel connection state subscription
+    await _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
+    
     await _modbusService?.disconnect();
     _modbusService?.dispose();
     _modbusService = null;
@@ -179,7 +210,14 @@ class ModbusProvider extends ChangeNotifier {
   /// Update current request
   void updateRequest(ModbusRequest request) {
     _currentRequest = request;
+    // Update slave ID for keep-alive
+    _currentSlaveId = request.slaveId;
     notifyListeners();
+  }
+  
+  /// Set current slave ID (for keep-alive)
+  void setCurrentSlaveId(int slaveId) {
+    _currentSlaveId = slaveId;
   }
   
   /// Send Modbus request
@@ -339,6 +377,7 @@ class ModbusProvider extends ChangeNotifier {
   @override
   void dispose() {
     _pollingTimer?.cancel();
+    _connectionStateSubscription?.cancel();
     _modbusService?.dispose();
     super.dispose();
   }

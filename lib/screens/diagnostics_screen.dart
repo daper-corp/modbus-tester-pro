@@ -20,7 +20,7 @@ class DiagnosticsScreen extends StatefulWidget {
 class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   bool _isTestRunning = false;
   String _testStatus = 'Ready to test';
-  List<DiagnosticResult> _testResults = [];
+  final List<DiagnosticResult> _testResults = [];
   CommunicationStats _testStats = CommunicationStats(startTime: DateTime.now());
   
   int _pingCount = 10;

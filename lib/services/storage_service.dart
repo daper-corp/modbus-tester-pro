@@ -1,7 +1,23 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/modbus_models.dart';
+
+/// Storage operation result with error information
+class StorageResult<T> {
+  final bool success;
+  final T? data;
+  final String? errorMessage;
+  final int? corruptedCount;  // For getAllProfiles
+  
+  const StorageResult.success(this.data) 
+      : success = true, errorMessage = null, corruptedCount = null;
+  const StorageResult.successWithWarning(this.data, this.corruptedCount)
+      : success = true, errorMessage = null;
+  const StorageResult.failure(this.errorMessage) 
+      : success = false, data = null, corruptedCount = null;
+}
 
 /// Service for managing local storage
 class StorageService {
@@ -34,34 +50,81 @@ class StorageService {
     await _profilesBox.put(profile.id, jsonEncode(profile.toJson()));
   }
   
-  /// Get all device profiles
-  List<DeviceProfile> getAllProfiles() {
+  /// Get all device profiles with error reporting
+  StorageResult<List<DeviceProfile>> getAllProfilesWithResult() {
     final profiles = <DeviceProfile>[];
+    int corruptedCount = 0;
+    final corruptedKeys = <String>[];
+    
     for (final key in _profilesBox.keys) {
       final json = _profilesBox.get(key);
       if (json != null) {
         try {
           profiles.add(DeviceProfile.fromJson(jsonDecode(json)));
         } catch (e) {
-          // Skip invalid profiles
+          corruptedCount++;
+          corruptedKeys.add(key.toString());
+          if (kDebugMode) {
+            debugPrint('StorageService: Corrupted profile at key $key: $e');
+          }
         }
       }
     }
+    
     profiles.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    return profiles;
+    
+    if (corruptedCount > 0) {
+      return StorageResult.successWithWarning(profiles, corruptedCount);
+    }
+    return StorageResult.success(profiles);
   }
   
-  /// Get profile by ID
-  DeviceProfile? getProfile(String id) {
-    final json = _profilesBox.get(id);
-    if (json != null) {
-      try {
-        return DeviceProfile.fromJson(jsonDecode(json));
-      } catch (e) {
-        return null;
+  /// Get all device profiles (legacy method for backward compatibility)
+  List<DeviceProfile> getAllProfiles() {
+    return getAllProfilesWithResult().data ?? [];
+  }
+  
+  /// Clean up corrupted profiles
+  Future<int> cleanCorruptedProfiles() async {
+    int cleanedCount = 0;
+    final keysToDelete = <String>[];
+    
+    for (final key in _profilesBox.keys) {
+      final json = _profilesBox.get(key);
+      if (json != null) {
+        try {
+          DeviceProfile.fromJson(jsonDecode(json));
+        } catch (e) {
+          keysToDelete.add(key.toString());
+        }
       }
     }
-    return null;
+    
+    for (final key in keysToDelete) {
+      await _profilesBox.delete(key);
+      cleanedCount++;
+    }
+    
+    return cleanedCount;
+  }
+  
+  /// Get profile by ID with error reporting
+  StorageResult<DeviceProfile> getProfileWithResult(String id) {
+    final json = _profilesBox.get(id);
+    if (json == null) {
+      return const StorageResult.failure('Profile not found');
+    }
+    
+    try {
+      return StorageResult.success(DeviceProfile.fromJson(jsonDecode(json)));
+    } catch (e) {
+      return StorageResult.failure('Profile data corrupted: $e');
+    }
+  }
+  
+  /// Get profile by ID (legacy method)
+  DeviceProfile? getProfile(String id) {
+    return getProfileWithResult(id).data;
   }
   
   /// Delete profile
@@ -177,24 +240,43 @@ class StorageService {
     return const JsonEncoder.withIndent('  ').convert(data);
   }
   
-  /// Import data from JSON
-  Future<void> importData(String jsonData) async {
-    final data = jsonDecode(jsonData);
-    
-    // Import profiles
-    if (data['profiles'] != null) {
-      for (final profileJson in data['profiles']) {
-        final profile = DeviceProfile.fromJson(profileJson);
-        await saveProfile(profile);
+  /// Import data from JSON with error reporting
+  Future<StorageResult<ImportResult>> importData(String jsonData) async {
+    try {
+      final data = jsonDecode(jsonData);
+      int importedProfiles = 0;
+      int failedProfiles = 0;
+      final errors = <String>[];
+      
+      // Import profiles
+      if (data['profiles'] != null) {
+        for (final profileJson in data['profiles']) {
+          try {
+            final profile = DeviceProfile.fromJson(profileJson);
+            await saveProfile(profile);
+            importedProfiles++;
+          } catch (e) {
+            failedProfiles++;
+            errors.add('Failed to import profile: $e');
+          }
+        }
       }
-    }
-    
-    // Import settings
-    if (data['settings'] != null) {
-      final settings = data['settings'];
-      if (settings['pollingInterval'] != null) {
-        await savePollingInterval(settings['pollingInterval']);
+      
+      // Import settings
+      if (data['settings'] != null) {
+        final settings = data['settings'];
+        if (settings['pollingInterval'] != null) {
+          await savePollingInterval(settings['pollingInterval']);
+        }
       }
+      
+      return StorageResult.success(ImportResult(
+        importedProfiles: importedProfiles,
+        failedProfiles: failedProfiles,
+        errors: errors,
+      ));
+    } catch (e) {
+      return StorageResult.failure('Invalid JSON format: $e');
     }
   }
   
@@ -202,4 +284,20 @@ class StorageService {
     _profilesBox.close();
     _settingsBox.close();
   }
+}
+
+/// Result of import operation
+class ImportResult {
+  final int importedProfiles;
+  final int failedProfiles;
+  final List<String> errors;
+  
+  const ImportResult({
+    required this.importedProfiles,
+    required this.failedProfiles,
+    required this.errors,
+  });
+  
+  bool get hasErrors => failedProfiles > 0;
+  String get summary => 'Imported $importedProfiles profile(s)${failedProfiles > 0 ? ', $failedProfiles failed' : ''}';
 }

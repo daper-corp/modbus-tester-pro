@@ -21,6 +21,9 @@ class ModbusTcpServiceEnhanced implements ModbusService {
   static const int _maxReconnectAttempts = 5;
   static const int _keepAliveIntervalMs = 30000;
   
+  // Current slave ID for keep-alive (can be updated dynamically)
+  int _keepAliveSlaveId = 1;
+  
   // Request queue for sequential processing
   final _requestQueue = <_QueuedRequest>[];
   bool _isProcessingQueue = false;
@@ -36,6 +39,13 @@ class ModbusTcpServiceEnhanced implements ModbusService {
   @override
   Stream<ModbusConnectionState> get connectionStateStream => _connectionStateController.stream;
   bool get isConnected => _connectionState == ModbusConnectionState.connected;
+  
+  /// Set the slave ID to use for keep-alive requests
+  void setKeepAliveSlaveId(int slaveId) {
+    if (slaveId >= 1 && slaveId <= 247) {
+      _keepAliveSlaveId = slaveId;
+    }
+  }
   
   void _setConnectionState(ModbusConnectionState state) {
     if (_connectionState != state) {
@@ -145,15 +155,15 @@ class ModbusTcpServiceEnhanced implements ModbusService {
     if (!isConnected) return;
     
     try {
-      // Send a simple read request as keep-alive
-      await sendRequest(const ModbusRequest(
-        slaveId: 1,
+      // Send a simple read request as keep-alive using current slave ID
+      await sendRequest(ModbusRequest(
+        slaveId: _keepAliveSlaveId,
         functionCode: ModbusFunctionCode.readHoldingRegisters,
         startAddress: 0,
         quantity: 1,
       ));
     } catch (_) {
-      // Ignore keep-alive errors
+      // Ignore keep-alive errors - connection loss will be detected by socket listener
     }
   }
   

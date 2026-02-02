@@ -1,5 +1,6 @@
-package com.modbustester.modbus_tester
+package com.modbustester.test
 
 import io.flutter.embedding.android.FlutterActivity
 
 class MainActivity : FlutterActivity()
+
